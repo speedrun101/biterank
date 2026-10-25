@@ -1,6 +1,6 @@
 'use client'
 
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type Dispatch, type SetStateAction, type ReactNode } from 'react'
+import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
 import React from 'react'
 import {
   supabase,
@@ -10,7 +10,6 @@ import {
   submitOrUpdateRating,
   getUserProfileStats,
   removeUserRating,
-  getFoodLeaderboard,
   getUserRatingsWithDetails,
 } from '@/lib/api'
 
@@ -36,7 +35,7 @@ type Store = {
   notifications: boolean
   ratingDishId: string | null
   hostelSheetOpen: boolean
-  signIn: (email: string) => void
+  signIn: (email: string) => Promise<boolean>
   signOut: () => Promise<void>
   setTab: (t: Tab) => void
   push: (v: View) => void
@@ -54,28 +53,6 @@ type Store = {
 
 const StoreContext = createContext<Store | null>(null)
 
-const SEED_FAVORITES = ['egg-roll@cautley-night', 'cold-coffee@govind-night', 'aloo-paratha@rajiv-day', 'maggi@rajendra-night']
-
-const SEED_RATINGS: Record<string, UserRating> = {
-  'egg-roll': { stars: 5, at: 5 },
-  maggi: { stars: 4, at: 4 },
-  'aloo-paratha': { stars: 3, at: 3 },
-  chai: { stars: 4, at: 2 },
-  'masala-dosa': { stars: 4, at: 1 },
-}
-
-function nameFromEmail(email: string) {
-  const local = email.split('@')[0]
-  if (local.toLowerCase() === 'aarav_m') return 'Aarav Mehta'
-  return local
-    .split(/[._-]+/)
-    .filter(Boolean)
-    .map((p) => p.replace(/\d+/g, ''))
-    .filter(Boolean)
-    .map((p) => p[0].toUpperCase() + p.slice(1).toLowerCase())
-    .join(' ') || 'IITR Student'
-}
-
 export function BiteStoreProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null)
   const [tab, setTabState] = useState<Tab>('food')
@@ -91,35 +68,36 @@ export function BiteStoreProvider({ children }: { children: ReactNode }) {
     try {
       const profile = await signInWithIITREmail(email)
       if (!profile) {
-        console.error('Sign‑in failed: profile is null')
+        console.error('Sign-in failed: profile is null')
         return false
       }
       setUser({ id: profile.id, name: profile.full_name, email: profile.email, hostelId: (profile.bhawan || 'azad').toLowerCase() })
       setTabState('food')
       setStack([])
-      // Load favorites and ratings after sign‑in
+      // Load favorites and ratings after sign-in
       const favs = await getUserFavorites(profile.id)
       setFavorites(favs.map((i: any) => i.id))
-      const stats = await getUserProfileStats(profile.id);
+      const stats = await getUserProfileStats(profile.id)
       const newRatings = stats.recentRatings.reduce((acc: Record<string, UserRating>, cur: any) => {
         acc[cur.menu_items.id] = { stars: cur.rating, waitMin: undefined, at: Date.now() }
         return acc
       }, {})
-      setRatings(newRatings);
+      setRatings(newRatings)
       // Fetch enriched dish details (name, hostel, shift, image)
-      const enriched = await getUserRatingsWithDetails(profile.id);
-      const detailMap: Record<string, { name: string; hostel: string; shift: string; image?: string }> = {};
+      const enriched = await getUserRatingsWithDetails(profile.id)
+      const detailMap: Record<string, { name: string; hostel: string; shift: string; image?: string }> = {}
       enriched.forEach((r: any) => {
-        const dish = r.menu_items;
-        detailMap[dish.id] = { name: dish.name, hostel: dish.canteens?.bhawan ?? '', shift: dish.canteens?.shift_type ?? '', image: dish.image_url ?? '' };
-      });
-      setDishDetails(detailMap);
+        const dish = r.menu_items
+        detailMap[dish.id] = { name: dish.name, hostel: dish.canteens?.bhawan ?? '', shift: dish.canteens?.shift_type ?? '', image: dish.image_url ?? '' }
+      })
+      setDishDetails(detailMap)
       return true
     } catch (e) {
-      console.error('Sign‑in failed', e)
+      console.error('Sign-in failed', e)
       return false
     }
   }, [])
+
   useEffect(() => {
     const saved = localStorage.getItem('forkrank_user')
     if (saved) {
@@ -131,42 +109,38 @@ export function BiteStoreProvider({ children }: { children: ReactNode }) {
             setFavorites(favs.map((i: any) => i.id))
             const stats = await getUserProfileStats(parsed.id)
             const newRatings = stats.recentRatings.reduce((acc: Record<string, UserRating>, cur: any) => {
-              acc[cur.menu_items.id] = { stars: cur.rating, waitMin: undefined, at: Date.now() };;
-              return acc;;
-            }, {});;
-            setRatings(newRatings);
-            // Fetch enriched dish details (name, hostel, shift)
-            const enriched = await getUserRatingsWithDetails(parsed.id);
-            const detailMap: Record<string, { name: string; hostel: string; shift: string; image?: string }> = {};
+              acc[cur.menu_items.id] = { stars: cur.rating, waitMin: undefined, at: Date.now() }
+              return acc
+            }, {})
+            setRatings(newRatings)
+            const enriched = await getUserRatingsWithDetails(parsed.id)
+            const detailMap: Record<string, { name: string; hostel: string; shift: string; image?: string }> = {}
             enriched.forEach((r: any) => {
-              const dish = r.menu_items;
-              detailMap[dish.id] = { name: dish.name, hostel: dish.canteens?.bhawan ?? '', shift: dish.canteens?.shift_type ?? '', image: dish.image_url ?? '' };
-            });
-            setDishDetails(detailMap);
-
+              const dish = r.menu_items
+              detailMap[dish.id] = { name: dish.name, hostel: dish.canteens?.bhawan ?? '', shift: dish.canteens?.shift_type ?? '', image: dish.image_url ?? '' }
+            })
+            setDishDetails(detailMap)
           })()
       } catch { }
     }
   }, [])
-  const signOut = useCallback(async () => {
-    try {
-      if (supabase) {
-        // Force-clear local session and revoke tokens
-        await supabase.auth.signOut({ scope: 'local' })
-      }
-    } catch (e) {
-      console.warn('Supabase signOut error:', e)
-    }
 
-    // Explicitly wipe all Supabase keys from localStorage to prevent auto-relogin loops
+  const signOut = useCallback(async () => {
+    // 1. Synchronously disarm OAuth gate and wipe localStorage BEFORE React re-renders
     if (typeof window !== 'undefined') {
+      sessionStorage.removeItem('forkrank_oauth_pending')
+      localStorage.removeItem('forkrank_user')
       Object.keys(localStorage).forEach((key) => {
-        if (key.includes('supabase.auth.token') || key === 'forkrank_user') {
+        if (key.startsWith('sb-') || key.includes('supabase') || key === 'forkrank_user') {
           localStorage.removeItem(key)
         }
       })
+      if (window.location.hash || window.location.search) {
+        window.history.replaceState({}, document.title, window.location.pathname)
+      }
     }
 
+    // 2. Reset React state immediately so LoginView mounts cleanly
     setUser(null)
     setFavorites([])
     setRatings({})
@@ -174,6 +148,15 @@ export function BiteStoreProvider({ children }: { children: ReactNode }) {
     setStack([])
     setRatingDishId(null)
     setHostelSheetOpen(false)
+
+    // 3. Clear Supabase in-memory session in the background
+    try {
+      if (supabase) {
+        await supabase.auth.signOut({ scope: 'local' })
+      }
+    } catch (e) {
+      console.warn('Supabase signOut error:', e)
+    }
   }, [])
 
   const setTab = useCallback((t: Tab) => {
@@ -237,7 +220,7 @@ export function BiteStoreProvider({ children }: { children: ReactNode }) {
       stack,
       favorites,
       ratings,
-      dishDetails,          // <-- expose dish details
+      dishDetails,
       notifications,
       ratingDishId,
       hostelSheetOpen,
@@ -254,7 +237,7 @@ export function BiteStoreProvider({ children }: { children: ReactNode }) {
       setNotifications,
       setHostelSheetOpen,
       setHostel,
-      setDishDetails,       // <-- expose setter
+      setDishDetails,
     }),
     [user, tab, stack, favorites, ratings, dishDetails, notifications, ratingDishId, hostelSheetOpen, signIn, signOut, setTab, push, replaceTop, back, toggleFavorite, rate, removeRating, setHostel, setDishDetails],
   )
@@ -267,4 +250,3 @@ export function useBite() {
   if (!ctx) throw new Error('useBite must be used within BiteStoreProvider')
   return ctx
 }
-

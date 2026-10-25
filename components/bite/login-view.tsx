@@ -14,37 +14,46 @@ export function LoginView() {
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
 
-  // Listen for Google OAuth redirect & verify @*.iitr.ac.in domain
+  // Only process Google OAuth session if returning from an explicit Google Sign-In click
   useEffect(() => {
-    if (!supabase) return
+    if (!supabase || typeof window === 'undefined') return
     let mounted = true
     let processing = false
 
     // 0. Check if Supabase rejected a non-IITR email via the DB trigger in URL params
-    if (typeof window !== 'undefined') {
-      const params = new URLSearchParams(window.location.search || window.location.hash.replace('#', '?'))
-      const errDesc = params.get('error_description')
-      if (errDesc) {
-        setError('Access restricted exclusively to IIT Roorkee (@iitr.ac.in) email accounts.')
-        window.history.replaceState({}, document.title, window.location.pathname)
-      }
+    const params = new URLSearchParams(window.location.search || window.location.hash.replace('#', '?'))
+    const errDesc = params.get('error_description')
+    if (errDesc) {
+      sessionStorage.removeItem('forkrank_oauth_pending')
+      setError('Access restricted exclusively to IIT Roorkee (@iitr.ac.in) email accounts.')
+      window.history.replaceState({}, document.title, window.location.pathname)
+      return
+    }
 
-      // Stop auto-relogin if the user just clicked Log Out
-      if (sessionStorage.getItem('forkrank_just_signed_out') === 'true') {
-        return
-      }
+    // STRICT OPT-IN GATE: Only inspect Supabase session if user clicked "Continue with IITR Google"
+    const isOAuthCallback =
+      sessionStorage.getItem('forkrank_oauth_pending') === 'true' ||
+      window.location.hash.includes('access_token') ||
+      window.location.search.includes('code=')
+
+    if (!isOAuthCallback) {
+      return
     }
 
     async function handleOAuthSession(email: string | undefined) {
       if (!email || !mounted || processing) return
-      if (typeof window !== 'undefined' && sessionStorage.getItem('forkrank_just_signed_out') === 'true') {
-        return
-      }
       processing = true
+
+      // Consume the pending OAuth flag & clean URL immediately so it never triggers twice
+      sessionStorage.removeItem('forkrank_oauth_pending')
+      if (window.location.hash || window.location.search) {
+        window.history.replaceState({}, document.title, window.location.pathname)
+      }
+
       const cleanEmail = email.trim().toLowerCase()
 
       if (!IITR_EMAIL.test(cleanEmail)) {
-        await supabase.auth.signOut()
+        await supabase.auth.signOut({ scope: 'local' })
         if (mounted) {
           setError(`Access denied: "${cleanEmail}" is not an @iitr.ac.in institute email.`)
           setLoading(false)
@@ -62,17 +71,14 @@ export function LoginView() {
       processing = false
     }
 
-    // 1. Check if returning from Google OAuth redirect right now
+    // 1. Check session from Google OAuth redirect
     supabase.auth.getSession().then(({ data: { session } }: any) => {
       if (session?.user?.email) {
-        if (typeof window !== 'undefined' && window.location.hash) {
-          window.history.replaceState({}, document.title, window.location.pathname)
-        }
         handleOAuthSession(session.user.email)
       }
     })
 
-    // 2. Only listen for explicit SIGNED_IN events
+    // 2. Listen for SIGNED_IN event during redirect handshake
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event: string, session: any) => {
       if (event === 'SIGNED_IN' && session?.user?.email) {
         handleOAuthSession(session.user.email)
@@ -86,26 +92,32 @@ export function LoginView() {
   }, [signIn])
 
   async function handleGoogleLogin() {
-    if (typeof window !== 'undefined') {
-      sessionStorage.removeItem('forkrank_just_signed_out')
-    }
     if (!supabase) {
       setError('Database client not initialized – check environment variables')
       return
     }
     setError('')
     setLoading(true)
+
+    // Arm the OAuth callback gate ONLY when user clicks this button
+    if (typeof window !== 'undefined') {
+      sessionStorage.setItem('forkrank_oauth_pending', 'true')
+    }
+
     const { error: oauthError } = await supabase.auth.signInWithOAuth({
       provider: 'google',
       options: {
         redirectTo: typeof window !== 'undefined' ? window.location.origin : undefined,
         queryParams: {
-          prompt: 'select_account', // Always opens account picker so user can pick their IITR account
+          prompt: 'select_account',
         },
       },
     })
 
     if (oauthError) {
+      if (typeof window !== 'undefined') {
+        sessionStorage.removeItem('forkrank_oauth_pending')
+      }
       setError(oauthError.message || 'Could not start Google Sign-In')
       setLoading(false)
     }
@@ -185,12 +197,7 @@ export function LoginView() {
 
         <button
           type="button"
-          onClick={() => {
-            if (typeof window !== 'undefined') {
-              sessionStorage.removeItem('forkrank_just_signed_out')
-            }
-            signIn('aarav_m@iitr.ac.in')
-          }}
+          onClick={() => signIn('aarav_m@iitr.ac.in')}
           className="mt-3 w-full text-center text-[13px] text-fg-3 hover:text-fg-2"
         >
           Try the demo account
