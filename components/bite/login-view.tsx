@@ -28,10 +28,18 @@ export function LoginView() {
         setError('Access restricted exclusively to IIT Roorkee (@iitr.ac.in) email accounts.')
         window.history.replaceState({}, document.title, window.location.pathname)
       }
+
+      // Stop auto-relogin if the user just clicked Log Out
+      if (sessionStorage.getItem('forkrank_just_signed_out') === 'true') {
+        return
+      }
     }
 
     async function handleOAuthSession(email: string | undefined) {
       if (!email || !mounted || processing) return
+      if (typeof window !== 'undefined' && sessionStorage.getItem('forkrank_just_signed_out') === 'true') {
+        return
+      }
       processing = true
       const cleanEmail = email.trim().toLowerCase()
 
@@ -57,13 +65,16 @@ export function LoginView() {
     // 1. Check if returning from Google OAuth redirect right now
     supabase.auth.getSession().then(({ data: { session } }: any) => {
       if (session?.user?.email) {
+        if (typeof window !== 'undefined' && window.location.hash) {
+          window.history.replaceState({}, document.title, window.location.pathname)
+        }
         handleOAuthSession(session.user.email)
       }
     })
 
-    // 2. Also listen for auth state change events
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event: any, session: any) => {
-      if (session?.user?.email) {
+    // 2. Only listen for explicit SIGNED_IN events
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event: string, session: any) => {
+      if (event === 'SIGNED_IN' && session?.user?.email) {
         handleOAuthSession(session.user.email)
       }
     })
@@ -75,6 +86,9 @@ export function LoginView() {
   }, [signIn])
 
   async function handleGoogleLogin() {
+    if (typeof window !== 'undefined') {
+      sessionStorage.removeItem('forkrank_just_signed_out')
+    }
     if (!supabase) {
       setError('Database client not initialized – check environment variables')
       return
@@ -171,7 +185,12 @@ export function LoginView() {
 
         <button
           type="button"
-          onClick={() => signIn('aarav_m@iitr.ac.in')}
+          onClick={() => {
+            if (typeof window !== 'undefined') {
+              sessionStorage.removeItem('forkrank_just_signed_out')
+            }
+            signIn('aarav_m@iitr.ac.in')
+          }}
           className="mt-3 w-full text-center text-[13px] text-fg-3 hover:text-fg-2"
         >
           Try the demo account
