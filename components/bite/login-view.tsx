@@ -1,32 +1,100 @@
 'use client'
 
-import { useState, type FormEvent } from 'react'
+import { useEffect, useState } from 'react'
 import { motion } from 'framer-motion'
-import { Mail, Utensils } from 'lucide-react'
-import { cn } from '@/lib/utils'
+import { Utensils } from 'lucide-react'
 import { useBite } from '@/lib/bite-store'
+import { supabase } from '@/lib/api'
 import { MonoLabel } from './primitives'
 
 const IITR_EMAIL = /^[^\s@]+@([a-z0-9-]+\.)*iitr\.ac\.in$/i
 
 export function LoginView() {
   const { signIn } = useBite()
-  const [email, setEmail] = useState('')
   const [error, setError] = useState('')
+  const [loading, setLoading] = useState(false)
 
-  function onSubmit(e: FormEvent) {
-    e.preventDefault()
-    const value = email.trim()
-    if (!IITR_EMAIL.test(value)) {
-      setError('Use your institute email ending in iitr.ac.in')
+  // Listen for Google OAuth redirect & verify @*.iitr.ac.in domain
+  useEffect(() => {
+    if (!supabase) return
+    let mounted = true
+    let processing = false
+
+    // 0. Check if Supabase rejected a non-IITR email via the DB trigger in URL params
+    if (typeof window !== 'undefined') {
+      const params = new URLSearchParams(window.location.search || window.location.hash.replace('#', '?'))
+      const errDesc = params.get('error_description')
+      if (errDesc) {
+        setError('Access restricted exclusively to IIT Roorkee (@iitr.ac.in) email accounts.')
+        window.history.replaceState({}, document.title, window.location.pathname)
+      }
+    }
+
+    async function handleOAuthSession(email: string | undefined) {
+      if (!email || !mounted || processing) return
+      processing = true
+      const cleanEmail = email.trim().toLowerCase()
+
+      if (!IITR_EMAIL.test(cleanEmail)) {
+        await supabase.auth.signOut()
+        if (mounted) {
+          setError(`Access denied: "${cleanEmail}" is not an @iitr.ac.in institute email.`)
+          setLoading(false)
+        }
+        processing = false
+        return
+      }
+
+      if (mounted) setLoading(true)
+      const ok = await signIn(cleanEmail)
+      if (!ok && mounted) {
+        setError('Sign-in failed – please try again or check network')
+        setLoading(false)
+      }
+      processing = false
+    }
+
+    // 1. Check if returning from Google OAuth redirect right now
+    supabase.auth.getSession().then(({ data: { session } }: any) => {
+      if (session?.user?.email) {
+        handleOAuthSession(session.user.email)
+      }
+    })
+
+    // 2. Also listen for auth state change events
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event: any, session: any) => {
+      if (session?.user?.email) {
+        handleOAuthSession(session.user.email)
+      }
+    })
+
+    return () => {
+      mounted = false
+      subscription.unsubscribe()
+    }
+  }, [signIn])
+
+  async function handleGoogleLogin() {
+    if (!supabase) {
+      setError('Database client not initialized – check environment variables')
       return
     }
-    ;(async () => {
-      const ok = await signIn(value)
-      if (!ok) {
-        setError('Sign‑in failed – please try again or check network')
-      }
-    })()
+    setError('')
+    setLoading(true)
+    const { error: oauthError } = await supabase.auth.signInWithOAuth({
+      provider: 'google',
+      options: {
+        redirectTo: typeof window !== 'undefined' ? window.location.origin : undefined,
+        queryParams: {
+          prompt: 'select_account', // Always opens account picker so user can pick their IITR account
+        },
+      },
+    })
+
+    if (oauthError) {
+      setError(oauthError.message || 'Could not start Google Sign-In')
+      setLoading(false)
+    }
   }
 
   return (
@@ -59,54 +127,48 @@ export function LoginView() {
         </p>
       </div>
 
-      <form
-        onSubmit={onSubmit}
-        noValidate
-        className="relative mt-16 rounded-3xl border border-line bg-surface/90 p-5 backdrop-blur"
-      >
-        <MonoLabel className="block text-center text-[13px] text-brand">Sign in</MonoLabel>
-        <h2 className="mt-2 font-display text-[18px] font-semibold text-fg">Use your institute email</h2>
-        <label
-          className={cn(
-            'mt-4 flex items-center gap-3 rounded-2xl border bg-base px-4 py-3.5 transition-colors focus-within:border-brand',
-            error ? 'border-rose' : 'border-brand/60',
-          )}
-        >
-          <Mail className="size-4 shrink-0 text-brand" aria-hidden />
-          <span className="sr-only">Institute email</span>
-          <input
-            type="email"
-            autoComplete="email"
-            inputMode="email"
-            value={email}
-            onChange={(e) => {
-              setEmail(e.target.value)
-              if (error) setError('')
-            }}
-            placeholder="yourname@iitr.ac.in"
-            aria-invalid={!!error}
-            aria-describedby={error ? 'email-error' : undefined}
-            className="min-w-0 flex-1 bg-transparent text-[14px] text-fg outline-none placeholder:text-fg-3"
-          />
-        </label>
+      <div className="relative mt-16 rounded-3xl border border-line bg-surface/90 p-5 backdrop-blur">
+        <MonoLabel className="block text-center text-[13px] text-brand">Verified Campus Access</MonoLabel>
+        <h2 className="mt-2 text-center font-display text-[18px] font-semibold text-fg">
+          Sign in with your IITR Google Account
+        </h2>
+        <p className="mt-1 text-center text-[12px] text-fg-3">
+          Restricted to @iitr.ac.in &amp; department subdomains
+        </p>
+
         {error && (
           <motion.p
             id="email-error"
             role="alert"
             initial={{ opacity: 0, y: -4 }}
             animate={{ opacity: 1, y: 0 }}
-            className="mt-2 text-[13px] text-rose"
+            className="mt-3 rounded-xl border border-rose/40 bg-rose/10 px-3 py-2 text-center text-[13px] text-rose"
           >
             {error}
           </motion.p>
         )}
+
         <motion.button
-          type="submit"
+          type="button"
+          disabled={loading}
+          onClick={handleGoogleLogin}
           whileTap={{ scale: 0.98 }}
-          className="mt-4 w-full rounded-2xl bg-brand py-4 font-display text-[15px] font-semibold text-brand-on"
+          className="mt-5 flex w-full items-center justify-center gap-3 rounded-2xl bg-brand py-4 font-display text-[15px] font-semibold text-brand-on disabled:opacity-60"
         >
-          Continue with IITR email
+          {/* Google G Icon */}
+          <svg className="size-5" viewBox="0 0 24 24" aria-hidden="true">
+            <path
+              fill="currentColor"
+              d="M21.35 11.1h-9.17v2.73h6.51c-.33 1.81-1.5 3.34-3.2 4.37v3.62h5.18c3.03-2.79 4.78-6.9 4.78-11.82 0-.8-.08-1.57-.23-2.3z"
+            />
+            <path
+              fill="currentColor"
+              d="M12.18 22c4.32 0 7.95-1.43 10.6-3.88l-5.18-3.62c-1.43.96-3.26 1.53-5.42 1.53-4.17 0-7.7-2.81-8.96-6.6H-2.1v3.73C.54 18.4 5.94 22 12.18 22z"
+            />
+          </svg>
+          {loading ? 'Verifying IITR Account...' : 'Continue with IITR Google'}
         </motion.button>
+
         <button
           type="button"
           onClick={() => signIn('aarav_m@iitr.ac.in')}
@@ -114,7 +176,7 @@ export function LoginView() {
         >
           Try the demo account
         </button>
-      </form>
+      </div>
     </motion.main>
   )
 }
