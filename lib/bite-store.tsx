@@ -2,7 +2,18 @@
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type Dispatch, type SetStateAction, type ReactNode } from 'react'
 import React from 'react'
-import { signInWithIITREmail, getUserFavorites, toggleFavorite as apiToggleFavorite, submitOrUpdateRating, getUserProfileStats, removeUserRating, getFoodLeaderboard, getUserRatingsWithDetails } from '@/lib/api'
+import {
+  supabase,
+  signInWithIITREmail,
+  getUserFavorites,
+  toggleFavorite as apiToggleFavorite,
+  submitOrUpdateRating,
+  getUserProfileStats,
+  removeUserRating,
+  getFoodLeaderboard,
+  getUserRatingsWithDetails,
+} from '@/lib/api'
+
 import type { Shift } from './bite-data'
 
 export type Tab = 'food' | 'canteens' | 'favorites' | 'profile'
@@ -26,7 +37,7 @@ type Store = {
   ratingDishId: string | null
   hostelSheetOpen: boolean
   signIn: (email: string) => void
-  signOut: () => void
+  signOut: () => Promise<void>
   setTab: (t: Tab) => void
   push: (v: View) => void
   replaceTop: (v: View) => void
@@ -88,21 +99,21 @@ export function BiteStoreProvider({ children }: { children: ReactNode }) {
       setStack([])
       // Load favorites and ratings after sign‑in
       const favs = await getUserFavorites(profile.id)
-      setFavorites(favs.map((i:any) => i.id))
+      setFavorites(favs.map((i: any) => i.id))
       const stats = await getUserProfileStats(profile.id);
       const newRatings = stats.recentRatings.reduce((acc: Record<string, UserRating>, cur: any) => {
         acc[cur.menu_items.id] = { stars: cur.rating, waitMin: undefined, at: Date.now() }
         return acc
       }, {})
       setRatings(newRatings);
-// Fetch enriched dish details (name, hostel, shift, image)
-const enriched = await getUserRatingsWithDetails(profile.id);
-const detailMap: Record<string, { name: string; hostel: string; shift: string; image?: string }> = {};
-enriched.forEach((r:any) => {
-  const dish = r.menu_items;
-  detailMap[dish.id] = { name: dish.name, hostel: dish.canteens?.bhawan ?? '', shift: dish.canteens?.shift_type ?? '', image: dish.image_url ?? '' };
-});
-setDishDetails(detailMap);
+      // Fetch enriched dish details (name, hostel, shift, image)
+      const enriched = await getUserRatingsWithDetails(profile.id);
+      const detailMap: Record<string, { name: string; hostel: string; shift: string; image?: string }> = {};
+      enriched.forEach((r: any) => {
+        const dish = r.menu_items;
+        detailMap[dish.id] = { name: dish.name, hostel: dish.canteens?.bhawan ?? '', shift: dish.canteens?.shift_type ?? '', image: dish.image_url ?? '' };
+      });
+      setDishDetails(detailMap);
       return true
     } catch (e) {
       console.error('Sign‑in failed', e)
@@ -115,30 +126,51 @@ setDishDetails(detailMap);
       try {
         const parsed = JSON.parse(saved)
         setUser({ id: parsed.id, name: parsed.full_name, email: parsed.email, hostelId: (parsed.bhawan || 'azad').toLowerCase() })
-        ;(async () => {
-          const favs = await getUserFavorites(parsed.id)
-          setFavorites(favs.map((i:any) => i.id))
-          const stats = await getUserProfileStats(parsed.id)
-          const newRatings = stats.recentRatings.reduce((acc: Record<string, UserRating>, cur: any) => {
-            acc[cur.menu_items.id] = { stars: cur.rating, waitMin: undefined, at: Date.now() };;
-            return acc;;
-          }, {});;
-          setRatings(newRatings);
-          // Fetch enriched dish details (name, hostel, shift)
-          const enriched = await getUserRatingsWithDetails(parsed.id);
-          const detailMap: Record<string, { name: string; hostel: string; shift: string; image?: string }> = {};
-          enriched.forEach((r: any) => {
-            const dish = r.menu_items;
-            detailMap[dish.id] = { name: dish.name, hostel: dish.canteens?.bhawan ?? '', shift: dish.canteens?.shift_type ?? '', image: dish.image_url ?? '' };
-          });
-          setDishDetails(detailMap);
+          ; (async () => {
+            const favs = await getUserFavorites(parsed.id)
+            setFavorites(favs.map((i: any) => i.id))
+            const stats = await getUserProfileStats(parsed.id)
+            const newRatings = stats.recentRatings.reduce((acc: Record<string, UserRating>, cur: any) => {
+              acc[cur.menu_items.id] = { stars: cur.rating, waitMin: undefined, at: Date.now() };;
+              return acc;;
+            }, {});;
+            setRatings(newRatings);
+            // Fetch enriched dish details (name, hostel, shift)
+            const enriched = await getUserRatingsWithDetails(parsed.id);
+            const detailMap: Record<string, { name: string; hostel: string; shift: string; image?: string }> = {};
+            enriched.forEach((r: any) => {
+              const dish = r.menu_items;
+              detailMap[dish.id] = { name: dish.name, hostel: dish.canteens?.bhawan ?? '', shift: dish.canteens?.shift_type ?? '', image: dish.image_url ?? '' };
+            });
+            setDishDetails(detailMap);
 
-        })()
-      } catch {}
+          })()
+      } catch { }
     }
   }, [])
-  const signOut = useCallback(() => {
+  const signOut = useCallback(async () => {
+    try {
+      if (supabase) {
+        // Force-clear local session and revoke tokens
+        await supabase.auth.signOut({ scope: 'local' })
+      }
+    } catch (e) {
+      console.warn('Supabase signOut error:', e)
+    }
+
+    // Explicitly wipe all Supabase keys from localStorage to prevent auto-relogin loops
+    if (typeof window !== 'undefined') {
+      Object.keys(localStorage).forEach((key) => {
+        if (key.includes('supabase.auth.token') || key === 'forkrank_user') {
+          localStorage.removeItem(key)
+        }
+      })
+    }
+
     setUser(null)
+    setFavorites([])
+    setRatings({})
+    setDishDetails({})
     setStack([])
     setRatingDishId(null)
     setHostelSheetOpen(false)
@@ -181,9 +213,22 @@ setDishDetails(detailMap);
     setRatings(newRatings)
   }, [user])
 
-  const setHostel = useCallback((hostelId: string) => {
-    setUser((u) => (u ? { ...u, hostelId } : u))
-  }, [])
+  const setHostel = useCallback(async (hostelId: string) => {
+    setUser((u) => {
+      if (!u) return u
+      const saved = localStorage.getItem('forkrank_user')
+      if (saved) {
+        try {
+          const parsed = JSON.parse(saved)
+          localStorage.setItem('forkrank_user', JSON.stringify({ ...parsed, bhawan: hostelId }))
+        } catch { }
+      }
+      return { ...u, hostelId }
+    })
+    if (user && supabase) {
+      await supabase.from('profiles').update({ bhawan: hostelId }).eq('id', user.id)
+    }
+  }, [user])
 
   const value = useMemo<Store>(
     () => ({
